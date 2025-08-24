@@ -1,0 +1,118 @@
+name: terraform-and-helm-dryrun
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform fmt
+        run: terraform -chdir=terraform fmt -recursive
+
+      - name: Terraform validate
+        run: |
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform validate
+
+      - name: Terraform plan (no AWS calls, no costs)
+        env:
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+          AWS_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform plan -refresh=false \
+            -var-file=../tfvars/minimal.tfvars \
+            -out=tfplan.binary
+          # Human-readable plan (for logs)
+          terraform -chdir=terraform show tfplan.binary
+
+      - name: Convert plan to JSON
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform show -json tfplan.binary > tfplan.json
+          echo "JSON plan written to tfplan.json"
+
+      - name: Generate plan summary (Markdown)
+        run: |
+          set -euo pipefail
+          # Counters for adds/changes/destroys
+          ADDS=$(jq '[.resource_changes[]?.change.actions | select(index("create"))] | length' tfplan.json)
+          CHANGES=$(jq '[.resource_changes[]?.change.actions | select(index("update"))] | length' tfplan.json)
+          DESTROYS=$(jq '[.resource_changes[]?.change.actions | select(index("delete"))] | length' tfplan.json)
+
+          # Top planned resources (by type)
+          TOP=$(jq -r '
+            [.resource_changes[]? | select(.change.actions|index("create")) | .type]
+            | group_by(.) | map({type: .[0], count: length})
+            | sort_by(-.count) | .[0:10]
+            | (["Type","Creates"] as $h | $h), (.[] | [.type, (.count|tostring)])
+            | @tsv
+          ' tfplan.json | column -t)
+
+          # Produce Markdown summary
+          {
+            echo "# Terraform Plan Summary"
+            echo ""
+            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **Destroys:** ${DESTROYS}"
+            echo ""
+            echo "## Top Created Resource Types"
+            if [ -n "$TOP" ]; then
+              echo ""
+              echo '```text'
+              echo "$TOP"
+              echo '```'
+            else
+              echo ""
+              echo "_No new resources in plan._"
+            fi
+            echo ""
+            echo "## Helm Render"
+            echo "Rendered Kubernetes manifests are attached as an artifact (rendered.yaml)."
+          } > plan-summary.md
+
+          # Also surface a brief job summary in Actions UI
+          {
+            echo "### Terraform Plan Summary"
+            echo ""
+            echo "- Adds: **${ADDS}**"
+            echo "- Changes: **${CHANGES}**"
+            echo "- Destroys: **${DESTROYS}**"
+            echo ""
+            echo "_See the **Artifacts** section for full plan JSON, Markdown summary, and Helm render._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm lint and template (render only)
+        run: |
+          set -euo pipefail
+          helm lint helm/app
+          helm template retail-app helm/app -f helm/app/values.yaml > helm/rendered.yaml
+          echo "Rendered first 50 lines for visibility:"
+          head -n 50 helm/rendered.yaml
+
+      - name: Upload artifacts (plan, json, summary, helm)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-artifacts
+          path: |
+            tfplan.binary
+            tfplan.json
+            plan-summary.md
+            helm/rendered.yaml
+
