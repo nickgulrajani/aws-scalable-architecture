@@ -13,16 +13,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show repo tree (before run)
+      - name: Show repo tree
         run: |
-          echo "== Repo tree =="
+          echo "== repo =="
           ls -la
-          echo "== Terraform dir =="
+          echo "== terraform =="
           ls -la terraform || true
-          echo "== Helm dir =="
+          echo "== helm =="
           ls -la helm || true
 
-      - name: Ensure jq is present
+      - name: Ensure jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
@@ -32,15 +32,13 @@ jobs:
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform fmt
-        run: terraform -chdir=terraform fmt -recursive
-
-      - name: Terraform validate
+      - name: Terraform fmt/validate
         run: |
           terraform -chdir=terraform init -backend=false
+          terraform -chdir=terraform fmt -recursive
           terraform -chdir=terraform validate
 
-      - name: Terraform plan (no AWS calls, no costs)
+      - name: Terraform plan (no apply, no costs)
         env:
           AWS_ACCESS_KEY_ID: dummy
           AWS_SECRET_ACCESS_KEY: dummy
@@ -51,17 +49,48 @@ jobs:
           terraform -chdir=terraform plan -refresh=false \
             -var-file=../tfvars/minimal.tfvars \
             -out=tfplan.binary
-          echo "== Human-readable plan output =="
-          terraform -chdir=terraform show tfplan.binary | sed -n '1,120p'
-          echo "Plan file created at: terraform/tfplan.binary"
-          test -f terraform/tfplan.binary && echo "✅ tfplan.binary exists"
+          echo "== human-readable plan (first 150 lines) =="
+          terraform -chdir=terraform show tfplan.binary | sed -n '1,150p'
+          test -f terraform/tfplan.binary && echo "✅ terraform/tfplan.binary exists"
 
       - name: Convert plan to JSON
         run: |
           set -euo pipefail
           terraform -chdir=terraform show -json tfplan.binary > tfplan.json
-          echo "Wrote JSON to ./tfplan.json (repo root)"
           ls -la tfplan.json
+          jq '.resource_changes | length' tfplan.json
+
+      - name: List created resource types (log aid)
+        run: |
+          set -euo pipefail
+          echo "== Created resource types =="
+          jq -r '[.resource_changes[]? | select(.change.actions|index("create")) | .type]
+                 | group_by(.) | map({type: .[0], count: length})
+                 | sort_by(-.count) | .[] | "\(.type): \(.count)"' tfplan.json || true
+
+      - name: Policy gate — require tags on created resources
+        run: |
+          set -euo pipefail
+          # Require these keys in tags_all for any CREATED resource (provider default_tags should satisfy this)
+          REQUIRED='["Project","Environment","Owner","CostCenter"]'
+          MISSING=$(
+            jq -r --argjson req "$REQUIRED" '
+              [.resource_changes[]?
+               | select(.change.actions|index("create"))
+               | {addr: (.address), tags: (.change.after.tags_all // .change.after.tags // {})}
+              ]
+              | map(select([ $req[] ] as $keys | any($keys[]; .tags[.]? | not)))
+              | .[]
+              | "\(.addr)"
+            ' tfplan.json
+          )
+          if [ -n "$MISSING" ]; then
+            echo "::error::Some created resources are missing required tags. Offenders:"
+            echo "$MISSING"
+            exit 1
+          else
+            echo "✅ Tag policy passed (required tags present on created resources)."
+          fi
 
       - name: Generate plan summary (Markdown)
         run: |
@@ -75,8 +104,7 @@ jobs:
             | group_by(.) | map({type: .[0], count: length})
             | sort_by(-.count) | .[0:10]
             | (["Type","Creates"] as $h | $h), (.[] | [.type, (.count|tostring)])
-            | @tsv
-          ' tfplan.json | column -t)
+            | @tsv' tfplan.json | column -t)
 
           {
             echo "# Terraform Plan Summary"
@@ -84,24 +112,12 @@ jobs:
             echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **Destroys:** ${DESTROYS}"
             echo
             echo "## Top Created Resource Types"
-            if [ -n "$TOP" ]; then
-              echo
-              echo '```text'
-              echo "$TOP"
-              echo '```'
-            else
-              echo
-              echo "_No new resources in plan._"
-            fi
+            if [ -n "$TOP" ]; then echo; echo '```text'; echo "$TOP"; echo '```'; else echo; echo "_No new resources in plan._"; fi
             echo
             echo "## Helm Render"
             echo "Rendered Kubernetes manifests are attached as an artifact (helm/rendered.yaml)."
           } > plan-summary.md
 
-          echo "== plan-summary.md =="
-          sed -n '1,80p' plan-summary.md
-
-          # Actions UI summary
           {
             echo "### Terraform Plan Summary"
             echo
@@ -109,7 +125,7 @@ jobs:
             echo "- Changes: **${CHANGES}**"
             echo "- Destroys: **${DESTROYS}**"
             echo
-            echo "_See the **Artifacts** section for: tfplan.binary, tfplan.json, plan-summary.md, helm/rendered.yaml._"
+            echo "_See the **Artifacts**: tfplan.binary, tfplan.json, plan-summary.md, helm/rendered.yaml._"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Helm
@@ -120,11 +136,11 @@ jobs:
           set -euo pipefail
           helm lint helm/app
           helm template retail-app helm/app -f helm/app/values.yaml > helm/rendered.yaml
-          echo "Rendered first 50 lines for visibility:"
+          echo "== Helm rendered preview =="
           head -n 50 helm/rendered.yaml
           test -f helm/rendered.yaml && echo "✅ helm/rendered.yaml exists"
 
-      - name: Upload artifacts (plan, json, summary, helm)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dryrun-artifacts
@@ -135,12 +151,12 @@ jobs:
             helm/rendered.yaml
           if-no-files-found: error
 
-      - name: Show final tree
+      - name: Final tree
         run: |
-          echo "== Final repo tree =="
+          echo "== final repo tree =="
           ls -la
-          echo "== terraform dir =="
+          echo "== terraform =="
           ls -la terraform
-          echo "== helm dir =="
+          echo "== helm =="
           ls -la helm
 

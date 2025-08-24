@@ -13,6 +13,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show repo tree (before run)
+        run: |
+          echo "== Repo tree =="
+          ls -la
+          echo "== Terraform dir =="
+          ls -la terraform || true
+          echo "== Helm dir =="
+          ls -la helm || true
+
+      - name: Ensure jq is present
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -32,16 +46,101 @@ jobs:
           AWS_SECRET_ACCESS_KEY: dummy
           AWS_REGION: us-east-1
         run: |
+          set -euo pipefail
           terraform -chdir=terraform init -backend=false
-          terraform -chdir=terraform plan             -refresh=false             -var-file=../tfvars/minimal.tfvars             -out=tfplan.binary
-          terraform -chdir=terraform show tfplan.binary
+          terraform -chdir=terraform plan -refresh=false \
+            -var-file=../tfvars/minimal.tfvars \
+            -out=tfplan.binary
+          echo "== Human-readable plan output =="
+          terraform -chdir=terraform show tfplan.binary | sed -n '1,120p'
+          echo "Plan file created at: terraform/tfplan.binary"
+          test -f terraform/tfplan.binary && echo "✅ tfplan.binary exists"
+
+      - name: Convert plan to JSON
+        run: |
+          set -euo pipefail
+          terraform -chdir=terraform show -json tfplan.binary > tfplan.json
+          echo "Wrote JSON to ./tfplan.json (repo root)"
+          ls -la tfplan.json
+
+      - name: Generate plan summary (Markdown)
+        run: |
+          set -euo pipefail
+          ADDS=$(jq '[.resource_changes[]? | select(.change.actions|index("create"))] | length' tfplan.json)
+          CHANGES=$(jq '[.resource_changes[]? | select(.change.actions|index("update"))] | length' tfplan.json)
+          DESTROYS=$(jq '[.resource_changes[]? | select(.change.actions|index("delete"))] | length' tfplan.json)
+
+          TOP=$(jq -r '
+            [.resource_changes[]? | select(.change.actions|index("create")) | .type]
+            | group_by(.) | map({type: .[0], count: length})
+            | sort_by(-.count) | .[0:10]
+            | (["Type","Creates"] as $h | $h), (.[] | [.type, (.count|tostring)])
+            | @tsv
+          ' tfplan.json | column -t)
+
+          {
+            echo "# Terraform Plan Summary"
+            echo
+            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **Destroys:** ${DESTROYS}"
+            echo
+            echo "## Top Created Resource Types"
+            if [ -n "$TOP" ]; then
+              echo
+              echo '```text'
+              echo "$TOP"
+              echo '```'
+            else
+              echo
+              echo "_No new resources in plan._"
+            fi
+            echo
+            echo "## Helm Render"
+            echo "Rendered Kubernetes manifests are attached as an artifact (helm/rendered.yaml)."
+          } > plan-summary.md
+
+          echo "== plan-summary.md =="
+          sed -n '1,80p' plan-summary.md
+
+          # Actions UI summary
+          {
+            echo "### Terraform Plan Summary"
+            echo
+            echo "- Adds: **${ADDS}**"
+            echo "- Changes: **${CHANGES}**"
+            echo "- Destroys: **${DESTROYS}**"
+            echo
+            echo "_See the **Artifacts** section for: tfplan.binary, tfplan.json, plan-summary.md, helm/rendered.yaml._"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Helm
         uses: azure/setup-helm@v4
 
       - name: Helm lint and template (render only)
         run: |
+          set -euo pipefail
           helm lint helm/app
           helm template retail-app helm/app -f helm/app/values.yaml > helm/rendered.yaml
-          echo "Rendered manifests:"
+          echo "Rendered first 50 lines for visibility:"
           head -n 50 helm/rendered.yaml
+          test -f helm/rendered.yaml && echo "✅ helm/rendered.yaml exists"
+
+      - name: Upload artifacts (plan, json, summary, helm)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-artifacts
+          path: |
+            terraform/tfplan.binary
+            tfplan.json
+            plan-summary.md
+            helm/rendered.yaml
+          if-no-files-found: error
+
+      - name: Show final tree
+        run: |
+          echo "== Final repo tree =="
+          ls -la
+          echo "== terraform dir =="
+          ls -la terraform
+          echo "== helm dir =="
+          ls -la helm
+
