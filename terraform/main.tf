@@ -183,4 +183,42 @@ output "dryrun_summary" {
     eks_enabled       = false
   }
 }
+resource "aws_autoscaling_group" "web_asg" {
+  name                      = "${var.name_prefix}-asg-${var.environment}"
+  max_size                  = 4
+  min_size                  = 2
+  desired_capacity          = 2
+  vpc_zone_identifier       = var.private_subnet_ids
+  health_check_type         = "EC2"
+  health_check_grace_period = 60
+
+  launch_template {
+    id      = aws_launch_template.web.id
+    version = "$Latest"
+  }
+
+  target_group_arns = [aws_lb_target_group.web_tg.arn]
+
+  # --- add required tags (propagate to instances for visibility) ---
+  tag {
+    key                 = "Project"
+    value               = var.project
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Environment"
+    value               = var.environment
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Owner"
+    value               = "dry-run-demo"
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "CostCenter"
+    value               = "simulation-only"
+    propagate_at_launch = true
+  }
+}
 

@@ -68,31 +68,31 @@ jobs:
                  | group_by(.) | map({type: .[0], count: length})
                  | sort_by(-.count) | .[] | "\(.type): \(.count)"' tfplan.json || true
 
-      - name: Policy gate — require tags on created resources
+            - name: Policy gate — require tags on created resources
         run: |
           set -euo pipefail
-          # Require these tag keys on any resource being CREATED
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
+          # Resource types that don't support tags; skip them
+          SKIP_TYPES='["aws_cloudfront_origin_access_identity"]'
 
-          # jq program:
-          # - ensure_obj(): coerce non-object to {}
-          # - for each created resource: extract tags from .change.after (prefer tags_all, fallback to tags)
-          # - compute which required keys are missing
-          # - emit offenders with missing keys
           MISSING=$(
-            jq -r --argjson req "$REQUIRED" '
+            jq -r --argjson req "$REQUIRED" --argjson skip "$SKIP_TYPES" '
               def ensure_obj(x): if (x|type)=="object" then x else {} end;
 
               [
                 .resource_changes[]?
                 | select(.change.actions | index("create"))
+                # skip non-taggable resources
+                | select( ($skip | index(.type)) | not )
                 | . as $rc
+                # ASG uses .tag blocks; provider still emits tags_all after plan for many resources.
+                # We look for tags_all, fallback to tags, else {}
                 | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
-                | {addr: $rc.address,
+                | {addr: $rc.address, type: $rc.type,
                    missing: [$req[] | select( ($tags[.] // null) == null )]
                   }
                 | select(.missing | length > 0)
-                | "\(.addr) missing: \(.missing|join(", "))"
+                | "\(.addr) (\(.type)) missing: \(.missing|join(", "))"
               ] | .[]
             ' tfplan.json
           )
