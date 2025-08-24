@@ -71,21 +71,34 @@ jobs:
       - name: Policy gate — require tags on created resources
         run: |
           set -euo pipefail
-          # Require these keys in tags_all for any CREATED resource (provider default_tags should satisfy this)
+          # Require these tag keys on any resource being CREATED
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
+
+          # jq program:
+          # - ensure_obj(): coerce non-object to {}
+          # - for each created resource: extract tags from .change.after (prefer tags_all, fallback to tags)
+          # - compute which required keys are missing
+          # - emit offenders with missing keys
           MISSING=$(
             jq -r --argjson req "$REQUIRED" '
-              [.resource_changes[]?
-               | select(.change.actions|index("create"))
-               | {addr: (.address), tags: (.change.after.tags_all // .change.after.tags // {})}
-              ]
-              | map(select([ $req[] ] as $keys | any($keys[]; .tags[.]? | not)))
-              | .[]
-              | "\(.addr)"
+              def ensure_obj(x): if (x|type)=="object" then x else {} end;
+
+              [
+                .resource_changes[]?
+                | select(.change.actions | index("create"))
+                | . as $rc
+                | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
+                | {addr: $rc.address,
+                   missing: [$req[] | select( ($tags[.] // null) == null )]
+                  }
+                | select(.missing | length > 0)
+                | "\(.addr) missing: \(.missing|join(", "))"
+              ] | .[]
             ' tfplan.json
           )
+
           if [ -n "$MISSING" ]; then
-            echo "::error::Some created resources are missing required tags. Offenders:"
+            echo "::error::Some created resources are missing required tags:"
             echo "$MISSING"
             exit 1
           else
