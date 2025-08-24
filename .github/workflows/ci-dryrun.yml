@@ -68,6 +68,7 @@ jobs:
                  | group_by(.) | map({type: .[0], count: length})
                  | sort_by(-.count) | .[] | "\(.type): \(.count)"' tfplan.json || true
 
+      # ---------- Policy gate happens BEFORE summary & artifacts ----------
       - name: Policy gate — require tags on created resources
         run: |
           set -euo pipefail
@@ -78,6 +79,10 @@ jobs:
           MISSING=$(
             jq -r --argjson req "$REQUIRED" --argjson skip "$SKIP_TYPES" '
               def ensure_obj(x): if (x|type)=="object" then x else {} end;
+              def asg_tags_to_obj(a):
+                (a // [])
+                | map({ ( (.key // .Key) ): (.value // .Value) })
+                | add // {};
 
               [
                 .resource_changes[]?
@@ -85,8 +90,14 @@ jobs:
                 | . as $rc
                 # skip non-taggable resource types
                 | select( ($skip | index($rc.type)) | not )
-                # extract tags safely
-                | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
+                # extract tags safely per type
+                | (ensure_obj($rc.change.after)) as $after
+                | (
+                    if $rc.type == "aws_autoscaling_group"
+                    then asg_tags_to_obj($after.tag // $after.tags)   # ASG uses tag blocks array
+                    else ($after.tags_all // $after.tags // {})       # normal taggable resources
+                    end
+                  ) as $tags
                 | {addr: $rc.address, type: $rc.type,
                    missing: [$req[] | select( ($tags[.] // null) == null )]
                   }
@@ -103,6 +114,7 @@ jobs:
           else
             echo "✅ Tag policy passed (required tags present on created resources)."
           fi
+      # -------------------------------------------------------------------
 
       - name: Generate plan summary (Markdown)
         run: |
@@ -121,7 +133,7 @@ jobs:
           {
             echo "# Terraform Plan Summary"
             echo
-            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **DestROYS:** ${DESTROYS}"
+            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **Destroys:** ${DESTROYS}"
             echo
             echo "## Top Created Resource Types"
             if [ -n "$TOP" ]; then echo; echo '```text'; echo "$TOP"; echo '```'; else echo; echo "_No new resources in plan._"; fi
