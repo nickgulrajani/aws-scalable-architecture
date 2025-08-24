@@ -17,7 +17,7 @@ resource "aws_cloudfront_distribution" "cdn" {
   comment             = "Retail CDN (dry-run)"
   default_root_object = "index.html"
 
-  # FIXED: Use `origin` instead of `origins`
+  # Use `origin` (singular)
   origin {
     domain_name = "${aws_s3_bucket.assets.bucket}.s3.amazonaws.com"
     origin_id   = "s3-origin"
@@ -97,7 +97,7 @@ resource "aws_lb_listener" "http" {
 }
 
 # -------------------------------
-# Auto Scaling Group (EC2)
+# Launch Template
 # -------------------------------
 resource "aws_launch_template" "web" {
   name_prefix   = "${var.name_prefix}-lt-"
@@ -107,6 +107,9 @@ resource "aws_launch_template" "web" {
   user_data = base64encode("#!/bin/bash\n echo 'hello retail' > /var/www/html/index.html\n")
 }
 
+# -------------------------------
+# Auto Scaling Group (EC2)  — merged + tagged
+# -------------------------------
 resource "aws_autoscaling_group" "web_asg" {
   name                      = "${var.name_prefix}-asg-${var.environment}"
   max_size                  = 4
@@ -122,6 +125,28 @@ resource "aws_autoscaling_group" "web_asg" {
   }
 
   target_group_arns = [aws_lb_target_group.web_tg.arn]
+
+  # Required tags for policy gate (propagate to instances)
+  tag {
+    key                 = "Project"
+    value               = var.project
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Environment"
+    value               = var.environment
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "Owner"
+    value               = "dry-run-demo"
+    propagate_at_launch = true
+  }
+  tag {
+    key                 = "CostCenter"
+    value               = "simulation-only"
+    propagate_at_launch = true
+  }
 }
 
 # -------------------------------
@@ -173,6 +198,9 @@ resource "aws_db_instance" "app_db" {
 #   instance_types = ["t3.small"]
 # }
 
+# -------------------------------
+# Outputs
+# -------------------------------
 output "dryrun_summary" {
   value = {
     s3_bucket_name    = aws_s3_bucket.assets.bucket
@@ -183,42 +211,3 @@ output "dryrun_summary" {
     eks_enabled       = false
   }
 }
-resource "aws_autoscaling_group" "web_asg" {
-  name                      = "${var.name_prefix}-asg-${var.environment}"
-  max_size                  = 4
-  min_size                  = 2
-  desired_capacity          = 2
-  vpc_zone_identifier       = var.private_subnet_ids
-  health_check_type         = "EC2"
-  health_check_grace_period = 60
-
-  launch_template {
-    id      = aws_launch_template.web.id
-    version = "$Latest"
-  }
-
-  target_group_arns = [aws_lb_target_group.web_tg.arn]
-
-  # --- add required tags (propagate to instances for visibility) ---
-  tag {
-    key                 = "Project"
-    value               = var.project
-    propagate_at_launch = true
-  }
-  tag {
-    key                 = "Environment"
-    value               = var.environment
-    propagate_at_launch = true
-  }
-  tag {
-    key                 = "Owner"
-    value               = "dry-run-demo"
-    propagate_at_launch = true
-  }
-  tag {
-    key                 = "CostCenter"
-    value               = "simulation-only"
-    propagate_at_launch = true
-  }
-}
-

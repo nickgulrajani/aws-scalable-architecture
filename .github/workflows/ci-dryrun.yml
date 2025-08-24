@@ -68,7 +68,7 @@ jobs:
                  | group_by(.) | map({type: .[0], count: length})
                  | sort_by(-.count) | .[] | "\(.type): \(.count)"' tfplan.json || true
 
-            - name: Policy gate — require tags on created resources
+      - name: Policy gate — require tags on created resources
         run: |
           set -euo pipefail
           REQUIRED='["Project","Environment","Owner","CostCenter"]'
@@ -85,8 +85,7 @@ jobs:
                 # skip non-taggable resources
                 | select( ($skip | index(.type)) | not )
                 | . as $rc
-                # ASG uses .tag blocks; provider still emits tags_all after plan for many resources.
-                # We look for tags_all, fallback to tags, else {}
+                # use tags_all if present, fallback to tags
                 | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
                 | {addr: $rc.address, type: $rc.type,
                    missing: [$req[] | select( ($tags[.] // null) == null )]
@@ -172,4 +171,3 @@ jobs:
           ls -la terraform
           echo "== helm =="
           ls -la helm
-
