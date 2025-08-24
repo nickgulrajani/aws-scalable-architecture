@@ -1,0 +1,6 @@
+apiVersion: v2
+name: retail-app
+description: Retail microservice (render-only dry run)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
