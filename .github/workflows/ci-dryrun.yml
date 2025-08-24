@@ -82,10 +82,10 @@ jobs:
               [
                 .resource_changes[]?
                 | select(.change.actions | index("create"))
-                # skip non-taggable resources
-                | select( ($skip | index(.type)) | not )
                 | . as $rc
-                # use tags_all if present, fallback to tags
+                # skip non-taggable resource types
+                | select( ($skip | index($rc.type)) | not )
+                # extract tags safely
                 | (ensure_obj($rc.change.after) | (.tags_all // .tags // {})) as $tags
                 | {addr: $rc.address, type: $rc.type,
                    missing: [$req[] | select( ($tags[.] // null) == null )]
@@ -121,7 +121,7 @@ jobs:
           {
             echo "# Terraform Plan Summary"
             echo
-            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **Destroys:** ${DESTROYS}"
+            echo "**Adds:** ${ADDS}  |  **Changes:** ${CHANGES}  |  **DestROYS:** ${DESTROYS}"
             echo
             echo "## Top Created Resource Types"
             if [ -n "$TOP" ]; then echo; echo '```text'; echo "$TOP"; echo '```'; else echo; echo "_No new resources in plan._"; fi
