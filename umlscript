@@ -1,0 +1,64 @@
+@startuml
+title terraform-and-helm-dryrun (Zero-cost Terraform + Helm validation)
+
+actor Developer as Dev
+participant "GitHub Actions\n(workflow)" as CI
+participant "Repo" as Repo
+participant "Terraform CLI\n(-backend=false)" as TF
+participant "jq Policy Gate\n(required tags)" as TagGate
+participant "Helm CLI" as Helm
+database "Artifacts\n(tfplan.binary,\ntfplan.json,\nplan-summary.md,\nrendered.yaml)" as Store
+
+== Trigger ==
+Dev -> CI: Push / Pull Request to main
+
+== Checkout & Inspect ==
+CI -> Repo: actions/checkout@v4
+Repo --> CI: code
+CI -> CI: Show repo tree (terraform / helm dirs)
+
+== Tooling ==
+CI -> CI: apt-get install jq
+CI -> TF: setup-terraform (1.6.6)
+
+== Terraform validation (no costs) ==
+CI -> TF: init (-backend=false)\nfmt -recursive\nvalidate
+TF --> CI: validation ok
+
+== Terraform plan (plan-only) ==
+CI -> TF: plan -refresh=false -var-file=../tfvars/minimal.tfvars\n-out tfplan.binary
+note right of TF
+  No apply, no backend, dummy AWS creds
+  => $0 dry run
+end note
+TF --> CI: human-readable show (first 150 lines)
+CI -> TF: show -json tfplan.binary > tfplan.json
+TF --> CI: tfplan.json ready
+CI -> CI: list created resource types (log aid)
+
+== Policy gate (plan JSON) ==
+CI -> TagGate: Check required tags on CREATED resources\n(Project, Environment, Owner, CostCenter)\nSkip: aws_cloudfront_origin_access_identity\nASG special: tag blocks array -> map
+alt Missing required tags
+  TagGate --> CI: FAIL + offenders
+  CI -> Dev: Fix tagging and re-run
+else Tags present
+  TagGate --> CI: pass
+
+  == Plan summary ==
+  CI -> CI: Build plan-summary.md\n(Adds / Changes / Destroys, Top types)
+
+  == Helm checks (no cluster) ==
+  CI -> Helm: setup-helm\nhelm lint helm/app\nhelm template retail-app -> rendered.yaml
+  Helm --> CI: rendered.yaml preview
+
+  == Artifacts ==
+  CI -> Store: Upload tfplan.binary, tfplan.json,\nplan-summary.md, helm/rendered.yaml
+  Store --> CI: stored
+
+  CI -> Dev: Success: dry-run validation completed
+end
+
+== Final ==
+CI -> CI: Print final repo tree
+@enduml
+
